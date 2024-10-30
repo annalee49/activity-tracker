@@ -18,7 +18,7 @@ def zero_crossing_rate(data, window_size):
 
 # Parameters for the bandpass filter
 lowcut = 0.1  # Hz
-highcut = 3.5  # Hz
+highcut = 3.7  # Hz
 sampling_rate = 30.0  # Hz
 
 # read in acceleration file of interest
