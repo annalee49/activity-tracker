@@ -1,19 +1,9 @@
-import time
-from adafruit_circuitplayground import cp
 
-print("Sending accelerometer data over serial...")
+import time
+from adafruit_circuitplayground import cp 
 
 while True:
-    try:
-        # Read the acceleration values
-        x, y, z = cp.acceleration
+    x, y, z = cp.acceleration
+    print((x, y, z))
 
-        # Print them to the serial monitor (sent to the computer)
-        print(f"{x}, {y}, {z}")
-
-        # Wait before the next reading
-        time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("Logging stopped.")
-        break
+    time.sleep(0.1)
