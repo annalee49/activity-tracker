@@ -1,0 +1,11 @@
+# In this folder, there will be components of the programming code to send on the chip.
+# The full folder is in the google drive under 
+# "Research Folder -> Prototype Design->ESP32 CODE -> FUNCTIONAL BLE IMU CODE”.
+
+# In this folder are only included the main functional files. Main.c is the main code file,
+# gatt_svr.c contains BLE functions etc,  anything with .h, .txt or .yml are functional background files.
+
+# The rest of the environment/tool files etc are not included because there are a lot of them 
+# and I'm not sure how to share them to Github. 
+
+# The code in this folder should be functional if you already have an ESP-IDF environment set up. 
