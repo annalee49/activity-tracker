@@ -82,7 +82,8 @@ while True:
         for adv in ble.start_scan(ProvideServicesAdvertisement, timeout=2):
             if UARTService in adv.services:
                 print(f"Found Peripheral: {adv.address}")
-                with ble.connect(adv) as connection:
+                connection = ble.connect(adv)  # Explicitly connect
+                try:
                     print("Connected to Peripheral.")
                     uart_peripheral = connection[UARTService]
 
@@ -103,8 +104,9 @@ while True:
                             print(f"Peripheral Data: {peripheral_data}")
 
                         time.sleep(0.2)
-
-                print("Disconnected from Peripheral.")
+                finally:
+                    print("Disconnected from Peripheral.")
+                    connection.disconnect()
         ble.stop_scan()
 
     elif ble_enabled:
