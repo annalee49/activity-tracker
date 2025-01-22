@@ -1,0 +1,4 @@
+# Same thing as the other on-chip programming, just sends gyro info as well. 
+# updated Gatt_svr.c, updated main.c
+
+#Device used to appear as "blecsc" via BLE connection, now it appears as "ESP32C3_IMU"
