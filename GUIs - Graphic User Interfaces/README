@@ -1,2 +1,4 @@
-# This folder contains all the (computer based) GUIs - for ESP vs Circuitpy single device, dual device, 
+# This folder contains all the (computer based) GUIs - for ESP & Circuitpy single device, 
+# dual device (only acc. data, 1 compatible with gyro the other not), , 
 # dual device + Gyro on the ESP if ESP is connected.
+
