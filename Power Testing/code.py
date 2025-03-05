@@ -26,11 +26,13 @@ print("System initialized. Press button A to toggle BLE connection...")
 
 button_a_previous = False  # Track previous state of button A
 
-# Buffer settings
-DATA_BUFFER = []
-BUFFER_SIZE = 10  # Number of readings per burst
-TRANSMISSION_INTERVAL = 60  # Time in seconds (1 minute)
-last_transmission_time = time.monotonic()
+# **Fixed burst interval (store 30 seconds of data before sending)**
+BURST_INTERVAL = 30  # Time before sending all data (in seconds)
+SAMPLE_RATE = 0.1  # Sample every 0.3s
+BUFFER_SIZE = int(BURST_INTERVAL / SAMPLE_RATE)  # 100 data points for 30s at 0.3s intervals
+data_buffer = [""] * BUFFER_SIZE  # Pre-allocate buffer space
+buffer_index = 0  # Circular buffer index
+start_time = time.monotonic()  # Reference time
 
 while True:
     # Detect button press state change (button release)
@@ -45,33 +47,30 @@ while True:
             ble.stop_advertising()
             set_led_state(False)  # Show "off" state (red LED)
 
-    # Send button state over BLE if changed
-    if cp.button_a != button_a_previous:
-        button_state = "PRESSED" if cp.button_a else "RELEASED"
-        uart.write(f"BUTTON_{button_state}\n".encode("utf-8"))
-        print(f"Button A state: {button_state}")
-
-    # Collect acceleration data if BLE is enabled
+    # Store acceleration data in the circular buffer
     if ble_enabled:
         x, y, z = cp.acceleration
-        DATA_BUFFER.append((x, y, z))
+        timestamp = time.monotonic() - start_time  # **Relative timestamp**
+        data_buffer[buffer_index] = f"{timestamp:.2f},{x:.2f},{y:.2f},{z:.2f}"
+        buffer_index = (buffer_index + 1) % BUFFER_SIZE  # Circular buffer behavior
 
-        # Send data every 60 seconds (1 minute) or when the buffer reaches its limit
-        if (time.monotonic() - last_transmission_time) >= TRANSMISSION_INTERVAL:
-            if DATA_BUFFER:  # Ensure there is data to send
-                # Convert buffer to a string format
-                data_str = ";".join([f"({x:.2f},{y:.2f},{z:.2f})" for x, y, z in DATA_BUFFER])
+    # Check if BURST_INTERVAL has passed
+    if ble_enabled and (time.monotonic() - start_time >= BURST_INTERVAL):
+        # Send each line **individually** over BLE to ensure newline separation
+        for line in data_buffer:
+            if line:  # Ensure we don't send empty lines
+                uart.write((line + "\n").encode("utf-8"))
+                time.sleep(0.05)  # Small delay to prevent BLE congestion
 
-                # Send over BLE
-                uart.write((data_str + "\n").encode("utf-8"))
-                print(f"Sending Burst: {data_str}")  # Print for debugging
+        print(f"Sent {BUFFER_SIZE} data points in burst.")
 
-                # Clear buffer and reset transmission timer
-                DATA_BUFFER.clear()
-            last_transmission_time = time.monotonic()  # Reset the timer
+        # Reset buffer for the next cycle
+        data_buffer = [""] * BUFFER_SIZE  # Clear buffer
+        buffer_index = 0
+        start_time = time.monotonic()  # Reset reference time
 
     # Update button state
     button_a_previous = cp.button_a
 
-    # Small delay for debouncing
-    time.sleep(0.1)
+    # Small delay for sampling rate
+    time.sleep(SAMPLE_RATE)
