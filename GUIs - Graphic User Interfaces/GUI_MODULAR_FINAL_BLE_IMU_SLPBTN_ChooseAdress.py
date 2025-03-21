@@ -40,8 +40,8 @@
 ##############
 
 ## If Bleak doesn't work, uncomment these two lines and replace the path with whatever path leads to the Bleak library in your system
-#import sys
-#sys.path.append(r"C:\Users\andre\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages")  # Adjust accordingly
+import sys
+sys.path.append(r"C:\Users\andre\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages")  # Adjust accordingly
 
 
 import asyncio
@@ -63,8 +63,8 @@ save_directory = os.path.join(os.environ["USERPROFILE"])
 ESP32_ADDRESS1 = "A0:85:E3:08:92:CA" 
 ESP32_ADDRESS2 ="40:4C:CA:8C:60:5A"
 ESP32_ADDRESSES = [ESP32_ADDRESS1, ESP32_ADDRESS2]
-ESP32_NAME1= "ESP32C3 #1"
-ESP32_NAME2 ="ESP32C3 #2"
+ESP32_NAME1= "ESP32C3_1"
+ESP32_NAME2 ="ESP32C3_2"
 ESP32_NAMES = [ESP32_NAME1, ESP32_NAME2]
 PIO_Name ="THE_Bluefruit"
 KNOWN_CIRCUITPY_NAMES = ["CIRCUITPYb48a", "CIRCUITPYc67c"]
