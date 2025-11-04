@@ -21,7 +21,7 @@ log_dtype = np.dtype([
     ('gz_raw', np.int16),
 ])
 
-filename = r'C:\CLD Activity Tracker Arduino\Data\arjun_10_31_60_steps_abnormal.bin'
+filename = r"C:\CLD Activity Tracker Arduino\Data\11_3_25_Will_walking_abnormal_ankle__62_steps_20Hz.bin"
 data = np.fromfile(filename, dtype=log_dtype)
 
 if len(data) == 0:
@@ -58,7 +58,7 @@ df["gyro_mag"]  = np.sqrt(df["gx_dps"]**2 + df["gy_dps"]**2 + df["gz_dps"]**2)
 accel_mag = df["accel_mag"]
 
 # ---- 5. Prepare time base ----
-fs = 4  # Hz — adjust to your actual sampling rate
+fs = 20  # Hz — adjust to your actual sampling rate
 t = (df["timestamp"] - df["timestamp"].iloc[0]) / 1000 # convert ms → s
 print(t)
 
@@ -76,18 +76,22 @@ plt.show()
 
 
 # ---- 6. Filter both signals ----
-a_filt = butter_bandpass_filter(df["accel_mag"], 0.3, 1.5, fs)
-g_filt = butter_bandpass_filter(df["gyro_mag"], 0.3, 1.5, fs)
+a_filt = butter_bandpass_filter(df["accel_mag"], 0.2, 1.5, fs)
+g_filt = butter_bandpass_filter(df["gyro_mag"], 0.2, 1.5, fs)
 
 # ---- 7. Combine into unified "activity index" ----
 activity_index = 0.7 * a_filt + 0.3 * (g_filt / np.max(g_filt)) * np.mean(a_filt)
 
+height_threshold = np.percentile(a_filt, 90)
+prominence_threshold = height_threshold/2
+distance_threshold = int(1*fs)
 # ---- 8. Peak detection: one per oscillation (positive crests only) ----
 # Focus only on the positive lobes (top of each sine)
 peaks, props = find_peaks(
     a_filt,
-    prominence=np.std(a_filt) * 0.8,  # require noticeable amplitude
-    distance=int(fs * 0.3)                    # at least ~300 ms apart
+    height= height_threshold,
+    prominence=prominence_threshold,  # require noticeable amplitude
+    distance= distance_threshold                   # at least ~300 ms apart
 )
 
 # Optional: visualize prominence threshold
