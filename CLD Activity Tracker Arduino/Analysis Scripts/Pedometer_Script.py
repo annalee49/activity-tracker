@@ -66,7 +66,7 @@ plt.figure(figsize=(12, 6))
 plt.plot(t, accel_mag, color="steelblue", linewidth=1.0, label="Raw Accelerometer Data")
 plt.title("Raw Accelerometer Data", fontsize=14)
 plt.xlabel("Time (s)")
-plt.ylabel("Accelerometer Magnitude")
+plt.ylabel("Accelerometer Magnitude (m/s^2)")
 print(f"Plotting t from 0 to {t.max():.2f} seconds")
 plt.xlim(0, t.max() + 1) # Force the x-axis to match your (correct) t-data
 plt.legend()
@@ -97,6 +97,47 @@ peaks, props = find_peaks(
 # Optional: visualize prominence threshold
 print(f"Detected {len(peaks)} candidate motion peaks")
 
+# ---- 9. Gait Confirmation Filter (NEW STEP) ----
+# Only count peaks that are part of a continuous "walk" (gait).
+# This filters out isolated, random peaks.
+
+MIN_CONSECUTIVE_STEPS = 3  # Must take this many steps in a row to count
+MAX_STEP_INTERVAL_S = 6  # Max time allowed between steps (in seconds)
+
+final_peaks = [] # This will store the *indices* of confirmed steps
+
+if len(peaks) > 0:
+    # Get the times of all candidate peaks
+    peak_times = t.iloc[peaks].values
+    
+    # Calculate time difference between consecutive peaks
+    time_diffs = np.diff(peak_times)
+    
+    # 'current_group' will store the indices of peaks in a potential walk
+    current_group = [peaks[0]] 
+    
+    for i in range(len(time_diffs)):
+        # Check if the time gap is small enough to be part of the same walk
+        if time_diffs[i] <= MAX_STEP_INTERVAL_S:
+            # This step is part of the current group
+            current_group.append(peaks[i+1])
+        else:
+            # This step is too far. The group is broken.
+            # Check if the group we *just* finished is valid.
+            if len(current_group) >= MIN_CONSECUTIVE_STEPS:
+                final_peaks.extend(current_group) # Add them to the final list
+            
+            # Start a new group with the current peak
+            current_group = [peaks[i+1]]
+    
+    # At the end of the loop, check the very last group
+    if len(current_group) >= MIN_CONSECUTIVE_STEPS:
+        final_peaks.extend(current_group)
+
+# The step_count is the total number of peaks in all valid groups
+step_count = len(final_peaks)*2
+print(f"✅ Detected {step_count} steps (after gait confirmation)")
+
 # # ---- 9. Group nearby peaks into repetitions ----
 # rep_gap = int(fs * 0.6)  # consider any peaks within 0.6 s part of same rep
 # rep_indices = []
@@ -110,15 +151,15 @@ print(f"Detected {len(peaks)} candidate motion peaks")
 #             current = [peaks[i]]
 #     rep_indices.append(current)
 
-step_count = len(peaks)*2
-print(f"✅ Detected {step_count} steps")
+# step_count = len(peaks)*2
+# print(f"✅ Detected {step_count} steps")
 
 # ---- 10. Visualization ----
 plt.figure(figsize=(12, 6))
 plt.plot(t, a_filt, color="steelblue", linewidth=1.0, label="Activity Index (Accel+Gyro)")
-plt.scatter(t[peaks], activity_index[peaks], color='red', s=50, zorder=3, label='Detected Peaks')
+plt.scatter(t[final_peaks], activity_index[final_peaks], color='red', s=50, zorder=3, label='Detected Peaks')
 
-plt.title("Magnitude of Accelerometer Data", fontsize=14)
+plt.title("Filtered Accelerometer Data With Steps", fontsize=14)
 plt.xlabel("Time (s)")
 plt.ylabel("Magnitude of Accelerometer Data (m/s^2)")
 plt.legend()
