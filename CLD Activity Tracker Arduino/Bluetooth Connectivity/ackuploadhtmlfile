@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Bluetooth R/W Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                },
+            },
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-2xl">
+        <h1 class="text-2xl font-bold mb-6 text-center">Web Bluetooth R/W Demo</h1>
+        
+        <button id="scanButton" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300">
+            Scan for Bluetooth Devices
+        </button>
+
+        <div id="plotControls" class="hidden mt-6">
+            <h2 class="text-lg font-semibold mb-2">IMU Data Plots</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Accelerometer X (ax)</h3>
+                    <canvas id="axChart"></canvas>
+                </div>
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Accelerometer Y (ay)</h3>
+                    <canvas id="ayChart"></canvas>
+                </div>
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Accelerometer Z (az)</h3>
+                    <canvas id="azChart"></canvas>
+                </div>
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Gyroscope X (gx)</h3>
+                    <canvas id="gxChart"></canvas>
+                </div>
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Gyroscope Y (gy)</h3>
+                    <canvas id="gyChart"></canvas>
+                </div>
+                <div class="mb-2">
+                    <h3 class="text-md font-medium text-gray-700">Gyroscope Z (gz)</h3>
+                    <canvas id="gzChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div id="batteryControls" class="hidden mt-6">
+            <h2 class="text-lg font-semibold mb-2">Battery Service (Read/Notify)</h2>
+            <p class="text-xs text-gray-500 mb-2">Device must be configured with standard battery service <code>0x180F</code> to work.</p>
+            <div class="flex items-center justify-between">
+                <div class="text-lg">Battery: <span id="batteryLevel" class="font-bold text-blue-600">--%</span></div>
+                <div>
+                    <button id="readBatteryButton" class="bg-gray-200 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-300 transition duration-300 mr-2">Read</button>
+                    <button id="notifyBatteryButton" class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-600 transition duration-300">Start Notifications</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="textControls" class="hidden mt-6">
+            <h2 class="text-lg font-semibold mb-2">Command Service (Write)</h2>
+            <p class="text-xs text-gray-500 mb-2">Device must be configured with service UUID <code>...914b</code> and characteristic <code>...26a8</code> to work.</p>
+            <div class="flex space-x-2">
+                <input type="text" id="textInput" placeholder="Enter command (start, stop, export_ble)" class="flex-1 border-gray-300 border rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <button id="writeTextButton" class="bg-purple-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-purple-600 transition duration-300">Write</button>
+            </div>
+        </div>
+        
+        <div id="fileControls" class="hidden mt-6">
+            <h2 class="text-lg font-semibold mb-2">File Transfer (Notify)</h2>
+            <p class="text-xs text-gray-500 mb-2">Listening on characteristic <code>...26a9</code></p>
+            <div class="flex space-x-2 mb-2">
+                <button id="notifyFileButton" class="flex-1 bg-teal-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-teal-600 transition duration-300">Start File Notifications</button>
+                <button id="downloadCsvButton" class="flex-1 bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 transition duration-300">Download CSV</button>
+            </div>
+            <pre id="fileResults" class="text-sm text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto bg-gray-50 p-2 rounded-lg"></pre>
+        </div>
+
+        <div class="mt-6 text-left bg-gray-50 p-4 rounded-lg">
+            <h2 class="text-lg font-semibold mb-2">Log:</h2>
+            <pre id="results" class="text-sm text-gray-700 whitespace-pre-wrap h-48 overflow-y-auto"></pre>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Constants for Services and Characteristics ---
+        const CUSTOM_TEXT_SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const CUSTOM_TEXT_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const FILE_TRANSFER_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+        const BATTERY_SERVICE_UUID = 'battery_service';
+        const BATTERY_LEVEL_CHAR_UUID = 'battery_level';
+
+        // --- NEW: Constants for Parsing and Plotting ---
+        const LOG_ENTRY_SIZE = 16; // 4 (timestamp) + 3*2 (accel) + 3*2 (gyro)
+        const MAX_DATA_POINTS = 100; // Max points to show on the chart
+
+        // --- DOM Elements ---
+        const scanButton = document.getElementById('scanButton');
+        const resultsArea = document.getElementById('results');
+        
+        const batteryControls = document.getElementById('batteryControls');
+        const readBatteryButton = document.getElementById('readBatteryButton');
+        const notifyBatteryButton = document.getElementById('notifyBatteryButton');
+        const batteryLevel = document.getElementById('batteryLevel');
+
+        const textControls = document.getElementById('textControls');
+        const textInput = document.getElementById('textInput');
+        const writeTextButton = document.getElementById('writeTextButton');
+
+        const fileControls = document.getElementById('fileControls');
+        const notifyFileButton = document.getElementById('notifyFileButton');
+        const fileResults = document.getElementById('fileResults');
+        const downloadCsvButton = document.getElementById('downloadCsvButton');
+
+        const plotControls = document.getElementById('plotControls');
+        const axChartCanvas = document.getElementById('axChart');
+        const ayChartCanvas = document.getElementById('ayChart');
+        const azChartCanvas = document.getElementById('azChart');
+        const gxChartCanvas = document.getElementById('gxChart');
+        const gyChartCanvas = document.getElementById('gyChart');
+        const gzChartCanvas = document.getElementById('gzChart');
+
+        // --- Global State ---
+        let device = null;
+        let batteryLevelCharacteristic = null;
+        let textCharacteristic = null;
+        let fileCharacteristic = null;
+        let isNotifying = false;
+        let isFileNotifying = false;
+        
+        // --- MODIFIED: Added encoder and ACK constants ---
+        const textDecoder = new TextDecoder('utf-8');
+        const textEncoder = new TextEncoder(); // <-- NEW: Create encoder once
+        const ACK_MESSAGE = textEncoder.encode('ACK'); // <-- NEW: Encode ACK message once
+
+        let axChart = null, ayChart = null, azChart = null;
+        let gxChart = null, gyChart = null, gzChart = null;
+
+        let fileBuffer = new Uint8Array(0); // Buffer for incomplete data chunks
+        let chartsNeedUpdate = false; // Flag for render loop
+        let parsedEntryCount = 0;
+        let parsedData = []; // Array to store all parsed data for CSV
+
+        // --- Utility function to log messages ---
+        function log(message) {
+            console.log(message);
+            resultsArea.textContent += message + '\n';
+            resultsArea.scrollTop = resultsArea.scrollHeight;
+        }
+        
+        // Renamed function to log file status
+        function logFileData(message) {
+            fileResults.textContent = message + '\n' + fileResults.textContent;
+            // Keep the file log from growing too large
+            const lines = fileResults.textContent.split('\n');
+            if (lines.length > 50) {
+                fileResults.textContent = lines.slice(0, 50).join('\n');
+            }
+        }
+        
+        // Utility function to log file data
+        function logFile(message) {
+            fileResults.textContent += message + '\n';
+            fileResults.scrollTop = fileResults.scrollHeight;
+        }
+
+        // --- Check for Bluetooth availability ---
+        if ('bluetooth' in navigator) {
+            scanButton.addEventListener('click', handleScanClick);
+        } else {
+            log('Web Bluetooth is not supported in this browser. Please try Chrome on a desktop or Android device.');
+            scanButton.disabled = true;
+            scanButton.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+        downloadCsvButton.addEventListener('click', handleDownloadCsv);
+
+        // --- Chart Initialization ---
+        function createChartConfig(axisLabel, color) {
+            return {
+                type: 'line',
+                data: {
+                    labels: [], // Timestamps will go here
+                    datasets: [
+                        { label: axisLabel, data: [], borderColor: color, tension: 0.1, pointRadius: 0 }
+                    ]
+                },
+                options: {
+                    animation: false,
+                    plugins: {
+                        legend: { display: false } // Hide legend, title is enough
+                    },
+                    scales: {
+                        x: { title: { display: true, text: 'Timestamp (ms)' } },
+                        y: { title: { display: true, text: 'Value' } }
+                    }
+                }
+            };
+        }
+
+        function initializeCharts() {
+            if (axChart) axChart.destroy();
+            if (ayChart) ayChart.destroy();
+            if (azChart) azChart.destroy();
+            if (gxChart) gxChart.destroy();
+            if (gyChart) gyChart.destroy();
+            if (gzChart) gzChart.destroy();
+            
+            axChart = new Chart(axChartCanvas, createChartConfig('ax', 'rgb(255, 99, 132)'));
+            ayChart = new Chart(ayChartCanvas, createChartConfig('ay', 'rgb(54, 162, 235)'));
+            azChart = new Chart(azChartCanvas, createChartConfig('az', 'rgb(75, 192, 192)'));
+            gxChart = new Chart(gxChartCanvas, createChartConfig('gx', 'rgb(255, 159, 64)'));
+            gyChart = new Chart(gyChartCanvas, createChartConfig('gy', 'rgb(153, 102, 255)'));
+            gzChart = new Chart(gzChartCanvas, createChartConfig('gz', 'rgb(201, 203, 207)'));
+        }
+
+        function resetCharts() {
+            if (!axChart || !ayChart || !azChart || !gxChart || !gyChart || !gzChart) {
+                initializeCharts();
+            }
+            
+            const allCharts = [axChart, ayChart, azChart, gxChart, gyChart, gzChart];
+            for (let chart of allCharts) {
+                if (chart) { // Check if chart exists
+                    chart.data.labels = [];
+                    chart.data.datasets.forEach(dataset => {
+                        dataset.data = [];
+                    });
+                    chart.update('none');
+                }
+            }
+            parsedEntryCount = 0;
+        }
+        
+        // --- Chart Render Loop (for performance) ---
+        function chartRenderLoop() {
+            if (chartsNeedUpdate) {
+                if (axChart) axChart.update('none');
+                if (ayChart) ayChart.update('none');
+                if (azChart) azChart.update('none');
+                if (gxChart) gxChart.update('none');
+                if (gyChart) gyChart.update('none');
+                if (gzChart) gzChart.update('none');
+                chartsNeedUpdate = false;
+            }
+            requestAnimationFrame(chartRenderLoop);
+        }
+
+        // --- Main Scan and Connect Function ---
+        async function handleScanClick() {
+            log('Requesting Bluetooth device...');
+            
+            try {
+                log('DEBUG: Accepting all devices.');
+                device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [
+                        CUSTOM_TEXT_SERVICE_UUID, 
+                        BATTERY_SERVICE_UUID
+                    ] 
+                });
+
+                log(`Device selected: ${device.name || device.id}`);
+                scanButton.textContent = 'Connecting...';
+                scanButton.disabled = true;
+
+                log('Connecting to GATT Server...');
+                const server = await device.gatt.connect();
+                log('Connected to GATT Server.');
+                
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+
+                await setupBatteryService(server);
+                await setupTextService(server);
+                await setupFileService(server);
+
+                log('Setup complete. Ready to interact.');
+                scanButton.textContent = `Connected to ${device.name || device.id}`;
+
+            } catch (error) {
+                if (error.name === 'NotFoundError') {
+                    log('No device selected or scan canceled.');
+                } else {
+                    log(`Error: ${error.name} - ${error.message}`);
+                }
+                scanButton.textContent = 'Scan for Bluetooth Devices';
+                scanButton.disabled = false;
+            }
+        }
+
+        // --- Setup Battery Service ---
+        async function setupBatteryService(server) {
+             try {
+                log('Getting Battery Service...');
+                const service = await server.getPrimaryService(BATTERY_SERVICE_UUID);
+                log('Getting Battery Level Characteristic...');
+                batteryLevelCharacteristic = await service.getCharacteristic(BATTERY_LEVEL_CHAR_UUID);
+                log('Battery Service found!');
+                batteryControls.classList.remove('hidden');
+                readBatteryButton.addEventListener('click', readBatteryLevel);
+                notifyBatteryButton.addEventListener('click', toggleBatteryNotifications);
+            } catch (error) {
+                log('Battery Service not found on this device.');
+            }
+        }
+
+        // --- Setup Custom Text Service ---
+        async function setupTextService(server) {
+             try {
+                log('Getting Command Service...');
+                const service = await server.getPrimaryService(CUSTOM_TEXT_SERVICE_UUID);
+                log('Getting Command Characteristic...');
+                textCharacteristic = await service.getCharacteristic(CUSTOM_TEXT_CHAR_UUID);
+                log('Command Service found!');
+                textControls.classList.remove('hidden');
+                writeTextButton.addEventListener('click', writeText);
+            } catch (error) {
+                log('Command Service not found on this device.');
+                log(error.name);
+            }
+        }
+        
+        // --- Setup File Transfer Service ---
+        async function setupFileService(server) {
+             try {
+                log('Getting File Transfer Service...');
+                // It's part of the SAME service as the command characteristic
+                const service = await server.getPrimaryService(CUSTOM_TEXT_SERVICE_UUID);
+                log('Getting File Transfer Characteristic...');
+                // Use the correct UUID from your ESP32
+                fileCharacteristic = await service.getCharacteristic(FILE_TRANSFER_CHAR_UUID);
+                
+                log('File Transfer Characteristic found!');
+                fileControls.classList.remove('hidden');
+                plotControls.classList.remove('hidden'); // Show plots
+                notifyFileButton.addEventListener('click', toggleFileNotifications);
+
+            } catch (error) {
+                log('File Transfer Characteristic not found on this device.');
+                log(error.name);
+            }
+        }
+
+        // --- Battery Functions ---
+        async function readBatteryLevel() {
+            if (!batteryLevelCharacteristic) {
+                log('Battery characteristic not found.');
+                return;
+            }
+            try {
+                const value = await batteryLevelCharacteristic.readValue();
+                const level = value.getUint8(0);
+                log(`Battery Level read: ${level}%`);
+                batteryLevel.textContent = `${level}%`;
+            } catch (error) {
+                log(`Error reading battery level: ${error.name}`);
+            }
+        }
+        
+        async function toggleBatteryNotifications() {
+            if (!batteryLevelCharacteristic) {
+                log('Battery characteristic not found.');
+                return;
+            }
+            try {
+                if (isNotifying) {
+                    await batteryLevelCharacteristic.stopNotifications();
+                    batteryLevelCharacteristic.removeEventListener('characteristicvaluechanged', handleBatteryNotify);
+                    log('Battery notifications stopped.');
+                    notifyBatteryButton.textContent = 'Start Notifications';
+                    isNotifying = false;
+                } else {
+                    await batteryLevelCharacteristic.startNotifications();
+                    batteryLevelCharacteristic.addEventListener('characteristicvaluechanged', handleBatteryNotify);
+                    log('Battery notifications started.');
+                    notifyBatteryButton.textContent = 'Stop Notifications';
+                    isNotifying = true;
+                }
+            } catch (error) {
+                log(`Error with battery notifications: ${error.name}`);
+            }
+        }
+
+        function handleBatteryNotify(event) {
+            const value = event.target.value;
+            const level = value.getUint8(0);
+            log(`Battery Level notification: ${level}%`);
+            batteryLevel.textContent = `${level}%`;
+        }
+        
+        // --- File Notification Handlers ---
+        async function toggleFileNotifications() {
+            if (!fileCharacteristic) {
+                log('File characteristic not found.');
+                return;
+            }
+            try {
+                if (isFileNotifying) {
+                    await fileCharacteristic.stopNotifications();
+                    fileCharacteristic.removeEventListener('characteristicvaluechanged', handleFileNotify);
+                    log('File notifications stopped.');
+                    notifyFileButton.textContent = 'Start File Notifications';
+                    isFileNotifying = false;
+                } else {
+                    fileResults.textContent = ''; // Clear the log
+                    fileBuffer = new Uint8Array(0); // Clear the buffer
+                    resetCharts(); // Clear the charts
+                    parsedData = []; // Clear the data array
+                    logFileData('Listening for file data...');
+                    await fileCharacteristic.startNotifications();
+                    fileCharacteristic.addEventListener('characteristicvaluechanged', handleFileNotify);
+                    log('File notifications started.');
+                    notifyFileButton.textContent = 'Stop File Notifications';
+                    isFileNotifying = true;
+                }
+            } catch (error) {
+                log(`Error with file notifications: ${error.name}`);
+            }
+        }
+
+        // --- MODIFIED: This function is now the core parser AND ACK sender ---
+        function handleFileNotify(event) {
+            const value = event.target.value; // This is a DataView
+            
+            // Try to decode as text first (for END_OF_FILE)
+            try {
+                const text = textDecoder.decode(value);
+                if (text === "END_OF_FILE") {
+                    logFileData("--- END OF FILE ---");
+                    logFileData(`Total entries parsed: ${parsedEntryCount}`);
+                    toggleFileNotifications(); // Automatically stop
+                    return;
+                }
+            } catch (e) {
+                // Not valid text, must be binary data. Continue.
+            }
+            
+            // --- NEW: Send ACK back to the ESP32 ---
+            // We do this *immediately* after receiving a data packet
+            // to tell the ESP32 it's safe to send the next one.
+            sendAck();
+            // --- END OF NEW CODE ---
+            
+            // --- Binary Buffer Logic ---
+            // 1. Get new data as a byte array
+            const newData = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+            
+            // 2. Combine with existing buffer
+            let combinedBuffer = new Uint8Array(fileBuffer.length + newData.length);
+            combinedBuffer.set(fileBuffer);
+            combinedBuffer.set(newData, fileBuffer.length);
+            fileBuffer = combinedBuffer;
+
+            // 3. Process all complete 16-byte entries in the buffer
+            while (fileBuffer.length >= LOG_ENTRY_SIZE) {
+                const entryData = fileBuffer.slice(0, LOG_ENTRY_SIZE);
+                fileBuffer = fileBuffer.slice(LOG_ENTRY_SIZE);
+                
+                parseLogEntry(entryData);
+                parsedEntryCount++;
+            }
+            
+            logFileData(`Parsing... ${parsedEntryCount} entries. Buffer: ${fileBuffer.length} bytes.`);
+        }
+
+        // --- NEW: Function to send ACK ---
+        async function sendAck() {
+            if (!textCharacteristic) {
+                log('ACK Error: Text characteristic not found.');
+                return;
+            }
+            try {
+                // Use the globally encoded 'ACK' message
+                await textCharacteristic.writeValue(ACK_MESSAGE);
+                // console.log("ACK sent"); // Uncomment for deep debugging
+            } catch (error) {
+                log(`Error sending ACK: ${error.name}`);
+            }
+        }
+
+        // This function parses one 16-byte LogEntry
+        function parseLogEntry(entryData) {
+            const view = new DataView(entryData.buffer, entryData.byteOffset, entryData.byteLength);
+            
+            const timestamp = view.getUint32(0, true); // 0: 4 bytes
+            const ax = view.getInt16(4, true);    // 4: 2 bytes
+            const ay = view.getInt16(6, true);    // 6: 2 bytes
+            const az = view.getInt16(8, true);    // 8: 2 bytes
+            const gx = view.getInt16(10, true);   // 10: 2 bytes
+            const gy = view.getInt16(12, true);   // 12: 2 bytes
+            const gz = view.getInt16(14, true);   // 14: 2 bytes
+            
+            parsedData.push({ timestamp, ax, ay, az, gx, gy, gz });
+            
+            // Update the charts with the new data
+            updateCharts(timestamp, {ax, ay, az}, {gx, gy, gz});
+        }
+        
+        function updateCharts(timestamp, accel, gyro) {
+            const allCharts = [axChart, ayChart, azChart, gxChart, gyChart, gzChart];
+            const allData = [accel.ax, accel.ay, accel.az, gyro.gx, gyro.gy, gyro.gz];
+
+            for (let i = 0; i < allCharts.length; i++) {
+                const chart = allCharts[i];
+                if (chart) {
+                    chart.data.labels.push(timestamp);
+                    chart.data.datasets[0].data.push(allData[i]); // Push the specific axis data
+
+                    // Limit data points
+                    if (chart.data.labels.length > MAX_DATA_POINTS) {
+                        chart.data.labels.shift();
+                        chart.data.datasets[0].data.shift();
+                    }
+                }
+            }
+            
+            chartsNeedUpdate = true;
+        }
+
+        // --- Transmit Data (Write) ---
+        async function writeText() {
+            if (!textCharacteristic) {
+                log('Text characteristic not found.');
+                return;
+            }
+            if (textInput.value.length === 0) {
+                log('Please enter a command to send (e.g., start, stop, export_ble).');
+                return;
+            }
+            try {
+                // Use the global encoder
+                const data = textEncoder.encode(textInput.value);
+                await textCharacteristic.writeValue(data);
+                log(`Wrote command: "${textInput.value}"`);
+            } catch (error) {
+                log(`Error writing text: ${error.name}`);
+            }
+        }
+
+        // --- Handle CSV Download ---
+        function handleDownloadCsv() {
+            if (parsedData.length === 0) {
+                log('No data to download. Start notifications and wait for data.');
+                logFileData('CSV Download: No data to download.');
+                return;
+            }
+
+            log(`Preparing CSV for ${parsedData.length} entries...`);
+
+            // 1. Create CSV Header
+            const header = "timestamp,ax,ay,az,gx,gy,gz\n";
+
+            // 2. Create CSV Rows
+            const rows = parsedData.map(entry => {
+                return `${entry.timestamp},${entry.ax},${entry.ay},${entry.az},${entry.gx},${entry.gy},${entry.gz}`;
+            }).join('\n');
+
+            // 3. Combine header and rows
+            const csvContent = header + rows;
+
+            // 4. Create a blob and trigger download
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'imu_data.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            
+            // 5. Click the link and clean up
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            
+            log('CSV download initiated.');
+            logFileData('CSV download initiated.');
+        }
+
+        // --- Handle Disconnection ---
+        function onDisconnected() {
+            log(`Device ${device.name} disconnected.`);
+            scanButton.textContent = 'Scan for Bluetooth Devices';
+            scanButton.disabled = false;
+            
+            // Hide all controls
+            batteryControls.classList.add('hidden');
+            textControls.classList.add('hidden');
+            fileControls.classList.add('hidden');
+            plotControls.classList.add('hidden'); // Hide plots
+            
+            // Reset states
+            batteryLevel.textContent = '--%';
+            notifyBatteryButton.textContent = 'Start Notifications';
+            notifyFileButton.textContent = 'Start File Notifications';
+
+            device = null;
+            batteryLevelCharacteristic = null;
+            textCharacteristic = null;
+            fileCharacteristic = null;
+            isNotifying = false;
+            isFileNotifying = false;
+            
+            fileBuffer = new Uint8Array(0); // Clear buffer on disconnect
+            resetCharts();
+            parsedData = []; // Clear data on disconnect
+        }
+        
+        // --- Initialize Charts and Start Render Loop on Page Load ---
+        initializeCharts();
+        chartRenderLoop();
+
+    </script>
+</body>
+</html>
