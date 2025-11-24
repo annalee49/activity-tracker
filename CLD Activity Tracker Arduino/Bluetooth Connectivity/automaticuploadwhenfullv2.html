@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Bluetooth R/W Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif'], }, }, }, }
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-900 flex items-center justify-center min-h-screen p-4">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-2xl">
+        <h1 class="text-2xl font-bold mb-6 text-center">IMU Sync + Fast Export</h1>
+        
+        <button id="scanButton" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300">
+            Scan for Bluetooth Devices
+        </button>
+
+        <div id="mainControls" class="hidden mt-6">
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <button id="cmdStart" class="bg-green-500 text-white font-bold py-2 px-4 rounded hover:bg-green-600">Start Logging</button>
+                <button id="cmdStop" class="bg-red-500 text-white font-bold py-2 px-4 rounded hover:bg-red-600">Stop Logging</button>
+            </div>
+            
+            <h2 class="text-lg font-semibold mb-2">Data Export</h2>
+            <div class="flex space-x-2 mb-4">
+                <button id="cmdExport" class="flex-1 bg-purple-500 text-white font-bold py-2 px-4 rounded hover:bg-purple-600">Download Data (BLE)</button>
+                <button id="downloadCsvButton" class="flex-1 bg-gray-600 text-white font-bold py-2 px-4 rounded hover:bg-gray-700" disabled>Save CSV</button>
+            </div>
+            
+            <div class="text-xs text-gray-500 mb-1">Transfer Log:</div>
+            <pre id="fileResults" class="text-sm text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto bg-gray-50 p-2 rounded-lg border"></pre>
+        </div>
+
+        <div class="mt-6 text-left bg-gray-50 p-4 rounded-lg">
+            <h2 class="text-lg font-semibold mb-2">System Log:</h2>
+            <pre id="results" class="text-sm text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto"></pre>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const CMD_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const FILE_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+        const LOG_ENTRY_SIZE = 16; 
+
+        // --- UI Elements ---
+        const scanButton = document.getElementById('scanButton');
+        const mainControls = document.getElementById('mainControls');
+        const resultsArea = document.getElementById('results');
+        const fileResults = document.getElementById('fileResults');
+        
+        const cmdStart = document.getElementById('cmdStart');
+        const cmdStop = document.getElementById('cmdStop');
+        const cmdExport = document.getElementById('cmdExport');
+        const downloadCsvButton = document.getElementById('downloadCsvButton');
+
+        // --- State ---
+        let device, server, cmdChar, fileChar;
+        let fileBuffer = new Uint8Array(0);
+        let parsedData = [];
+        let isDownloading = false;
+        let isAutoCycle = false; // <-- Tracks auto-resume status
+        
+        const textEncoder = new TextEncoder();
+        const textDecoder = new TextDecoder('utf-8');
+        const ACK_MESSAGE = textEncoder.encode('ACK');
+
+        // --- Logging Utilities ---
+        function log(msg) {
+            console.log(msg);
+            resultsArea.textContent += msg + '\n';
+            resultsArea.scrollTop = resultsArea.scrollHeight;
+        }
+        function logFile(msg) {
+            fileResults.textContent = msg + '\n' + fileResults.textContent;
+        }
+
+        // --- Bluetooth Connect ---
+        scanButton.addEventListener('click', async () => {
+            try {
+                log('Scanning...');
+                device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [SERVICE_UUID]
+                });
+                
+                log(`Connecting to ${device.name}...`);
+                server = await device.gatt.connect();
+                
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+                fileChar = await service.getCharacteristic(FILE_CHAR_UUID);
+                
+                log('Connected & Characteristics Found.');
+                
+                // --- NEW: Listen for Status Updates (Full Memory) ---
+                await cmdChar.startNotifications();
+                cmdChar.addEventListener('characteristicvaluechanged', handleStatusNotification);
+                
+                // Enable Controls
+                scanButton.textContent = "Connected";
+                scanButton.disabled = true;
+                mainControls.classList.remove('hidden');
+                
+                await syncTime();
+
+            } catch (e) {
+                log('Error: ' + e.message);
+            }
+        });
+
+        // --- Handle Status Notification (Memory Full) ---
+        function handleStatusNotification(event) {
+            const value = event.target.value;
+            const msg = textDecoder.decode(value);
+            
+            if (msg === "STATUS:FULL") {
+                log("⚠️ Memory Full Signal Received!");
+                log("Initializing Automatic Download...");
+                
+                isAutoCycle = true; // Set flag to resume later
+                cmdExport.click();  // Trigger download
+            }
+        }
+
+        // --- Time Sync ---
+        async function syncTime() {
+            const now = new Date();
+            const midnight = new Date(now);
+            midnight.setHours(0, 0, 0, 0);
+            const msSinceMidnight = now.getTime() - midnight.getTime();
+            const command = `TIME:${msSinceMidnight}`;
+            log(`Syncing Time... (${msSinceMidnight}ms since midnight)`);
+            await cmdChar.writeValue(textEncoder.encode(command));
+        }
+
+        // --- Button Handlers ---
+        cmdStart.addEventListener('click', async () => {
+            await cmdChar.writeValue(textEncoder.encode('start'));
+            log('Sent: start');
+        });
+        
+        cmdStop.addEventListener('click', async () => {
+            await cmdChar.writeValue(textEncoder.encode('stop'));
+            log('Sent: stop');
+        });
+
+        // --- Export Logic ---
+        cmdExport.addEventListener('click', async () => {
+            if (isDownloading) return;
+            
+            isDownloading = true;
+            fileBuffer = new Uint8Array(0);
+            parsedData = [];
+            downloadCsvButton.disabled = true;
+            fileResults.textContent = "";
+            
+            log('Starting Download...');
+            
+            await fileChar.startNotifications();
+            fileChar.addEventListener('characteristicvaluechanged', handleDataPacket);
+            await cmdChar.writeValue(textEncoder.encode('export_ble'));
+        });
+
+        async function handleDataPacket(event) {
+            const value = event.target.value;
+            
+            try {
+                const text = textDecoder.decode(value);
+                if (text === "END_OF_FILE") {
+                    log('Download Complete.');
+                    logFile(`Total Entries: ${parsedData.length}`);
+                    await fileChar.stopNotifications();
+                    fileChar.removeEventListener('characteristicvaluechanged', handleDataPacket);
+                    isDownloading = false;
+                    downloadCsvButton.disabled = false;
+                    
+                    // 1. Auto-Save CSV
+                    log("Auto-saving CSV file...");
+                    downloadCsvButton.click();
+
+                    // 2. Auto-Resume Logic (Instant)
+                    if (isAutoCycle) {
+                        log("♻️ Auto-Cycle Active: Clearing memory & Resuming NOW.");
+                        
+                        // --- REMOVED THE 3-SECOND DELAY ---
+                        try {
+                            await cmdChar.writeValue(textEncoder.encode('start'));
+                            log("✅ Sent: start (Memory Cleared & Resumed)");
+                        } catch (e) { log("❌ Error resuming: " + e.message); }
+                        
+                        isAutoCycle = false;
+                    }
+                    return;
+                }
+            } catch (e) {}
+
+            // Keep sending ACKs normally. 
+            // The ESP32 will ignore most of them, which is fine and fast.
+            await cmdChar.writeValue(ACK_MESSAGE);
+
+            const newData = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+            let combined = new Uint8Array(fileBuffer.length + newData.length);
+            combined.set(fileBuffer);
+            combined.set(newData, fileBuffer.length);
+            fileBuffer = combined;
+
+            while (fileBuffer.length >= LOG_ENTRY_SIZE) {
+                parseEntry(fileBuffer.slice(0, LOG_ENTRY_SIZE));
+                fileBuffer = fileBuffer.slice(LOG_ENTRY_SIZE);
+            }
+            
+            // Optional: Comment this out to speed up UI rendering during transfer
+            // logFile(`Received: ${parsedData.length} entries...`); 
+        }
+
+        function parseEntry(bytes) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            parsedData.push({
+                timestamp: view.getUint32(0, true),
+                ax: view.getInt16(4, true),
+                ay: view.getInt16(6, true),
+                az: view.getInt16(8, true),
+                gx: view.getInt16(10, true),
+                gy: view.getInt16(12, true),
+                gz: view.getInt16(14, true)
+            });
+        }
+
+        downloadCsvButton.addEventListener('click', () => {
+            if(parsedData.length === 0) return;
+            let csv = "timestamp,ax,ay,az,gx,gy,gz\n";
+            parsedData.forEach(d => {
+                csv += `${d.timestamp},${d.ax},${d.ay},${d.az},${d.gx},${d.gy},${d.gz}\n`;
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `imu_data_${Date.now()}.csv`;
+            a.click();
+        });
+    </script>
+</body>
+</html>
