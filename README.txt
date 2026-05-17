@@ -1,0 +1,1 @@
+This code repository contains code for the Activity Tracking of Patients with CLD Project. The folder CLD Activity Tracker Arduino contains updated code from the second year of project development. Everything else is from the first year and does not apply to the current design.
