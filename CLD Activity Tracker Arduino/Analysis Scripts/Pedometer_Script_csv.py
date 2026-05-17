@@ -12,7 +12,7 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
 
 # ---- 2. Load IMU CSV data ----
 # !!! UPDATE THIS to the path of your downloaded CSV file !!!
-filename = r"C:\Users\wjcol\Downloads\imu_data.csv"
+filename = r"C:\Users\wjcol\Downloads\imu_data (3).csv"
 
 try:
     df = pd.read_csv(filename)
@@ -135,10 +135,7 @@ if len(peaks) > 0:
         final_peaks.extend(current_group)
 
 # The step_count is the total number of peaks in all valid groups
-step_count = len(final_peaks)
-# Note: The original script multiplied by 2. This is likely incorrect.
-# find_peaks finds one peak per step. The count should be len(final_peaks).
-# I have removed the '*2'.
+step_count = len(final_peaks)*2
 print(f"✅ Detected {step_count} steps (after gait confirmation)")
 
 # ---- 10. Visualization ----
