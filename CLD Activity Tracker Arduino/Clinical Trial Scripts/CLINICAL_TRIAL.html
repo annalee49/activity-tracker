@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMU Data Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif'], }, }, }, }
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-900 min-h-screen p-6">
+    
+    <div class="max-w-6xl mx-auto">
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">IMU Data Hub</h1>
+            <button id="addDeviceBtn" class="bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 shadow-lg transition flex items-center gap-2">
+                <span class="text-xl">+</span> Add Device
+            </button>
+        </div>
+
+        <div id="deviceGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+    </div>
+
+    <template id="deviceTemplate">
+        <div class="bg-white p-6 rounded-xl shadow-md border border-gray-200 flex flex-col h-full relative">
+            <div class="absolute top-4 right-4">
+                <span class="status-badge px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-800">Connected</span>
+            </div>
+            <h2 class="device-name text-xl font-bold mb-1 text-gray-800">IMU Device</h2>
+            <p class="text-xs text-gray-500 mb-6 device-id">ID: ...</p>
+
+            <div class="grid grid-cols-3 gap-2 mb-4">
+                <button class="btn-start bg-green-500 text-white font-bold py-2 px-2 rounded hover:bg-green-600 transition">Start</button>
+                <button class="btn-stop bg-red-500 text-white font-bold py-2 px-2 rounded hover:bg-red-600 transition">Stop</button>
+                <button class="btn-clear bg-yellow-500 text-white font-bold py-2 px-2 rounded hover:bg-yellow-600 transition">Clear</button>
+            </div>
+
+            <button class="btn-download w-full bg-purple-500 text-white font-bold py-2 px-4 rounded hover:bg-purple-600 mb-2 transition">Download Data</button>
+            
+            <div class="progress-container hidden w-full bg-gray-200 rounded-full h-2.5 mb-4">
+                <div class="progress-bar bg-purple-600 h-2.5 rounded-full" style="width: 0%"></div>
+            </div>
+
+            <div class="flex-grow">
+                <div class="text-xs text-gray-500 mb-1">Device Log:</div>
+                <pre class="log-area text-xs text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto bg-gray-50 p-2 rounded border font-mono"></pre>
+            </div>
+
+            <button class="btn-disconnect mt-4 text-xs text-gray-400 hover:text-red-500 underline self-center">Disconnect</button>
+        </div>
+    </template>
+
+    <script>
+        const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const CMD_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const FILE_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+        const LOG_ENTRY_SIZE = 16; 
+        const BATCH_SIZE = 50; 
+
+        const textEncoder = new TextEncoder();
+        const textDecoder = new TextDecoder('utf-8');
+        const ACK_MESSAGE = textEncoder.encode('ACK');
+
+        class IMUDevice {
+            constructor(bluetoothDevice, uiContainer) {
+                this.device = bluetoothDevice;
+                this.ui = uiContainer;
+                this.server = null;
+                this.cmdChar = null;
+                this.fileChar = null;
+                
+                this.fileBuffer = new Uint8Array(0);
+                this.parsedData = [];
+                this.isDownloading = false;
+                this.packetsReceived = 0;
+                this.watchdogTimer = null;
+
+                this.logArea = this.ui.querySelector('.log-area');
+                this.statusBadge = this.ui.querySelector('.status-badge');
+                this.nameLabel = this.ui.querySelector('.device-name');
+                this.idLabel = this.ui.querySelector('.device-id');
+                this.progressBar = this.ui.querySelector('.progress-bar');
+                this.progressContainer = this.ui.querySelector('.progress-container');
+
+                this.nameLabel.textContent = this.device.name || "Unknown Device";
+                this.idLabel.textContent = this.device.id;
+                
+                this.ui.querySelector('.btn-start').addEventListener('click', () => this.sendCommand('start'));
+                this.ui.querySelector('.btn-stop').addEventListener('click', () => this.sendCommand('stop'));
+                this.ui.querySelector('.btn-download').addEventListener('click', () => this.startDownload());
+                this.ui.querySelector('.btn-disconnect').addEventListener('click', () => this.disconnect());
+                
+                // Clear Button Logic
+                this.ui.querySelector('.btn-clear').addEventListener('click', () => {
+                    if(confirm("Are you sure? This will delete all data on the device.")) {
+                        this.sendCommand('clear');
+                    }
+                });
+
+                this.device.addEventListener('gattserverdisconnected', () => this.onDisconnected());
+            }
+
+            log(msg) {
+                const time = new Date().toLocaleTimeString().split(' ')[0];
+                this.logArea.textContent = `[${time}] ${msg}\n` + this.logArea.textContent;
+            }
+
+            async connect() {
+                try {
+                    this.log("Connecting...");
+                    this.server = await this.device.gatt.connect();
+                    const service = await this.server.getPrimaryService(SERVICE_UUID);
+                    this.cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+                    this.fileChar = await service.getCharacteristic(FILE_CHAR_UUID);
+
+                    await this.cmdChar.startNotifications();
+                    this.cmdChar.addEventListener('characteristicvaluechanged', (e) => this.handleCmdNotification(e));
+
+                    this.statusBadge.textContent = "Online";
+                    this.statusBadge.className = "px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-800";
+                    this.log("Connected.");
+                    this.syncTime();
+
+                } catch (e) {
+                    this.log("Connection Failed: " + e.message);
+                    this.onDisconnected();
+                }
+            }
+
+            async sendCommand(cmd) {
+                if (!this.cmdChar) return;
+                await this.cmdChar.writeValue(textEncoder.encode(cmd));
+                this.log(`Sent: ${cmd}`);
+            }
+
+            async syncTime() {
+                const now = new Date();
+                const ms = now.getTime() - new Date(now).setHours(0,0,0,0);
+                await this.sendCommand(`TIME:${ms}`);
+            }
+
+            handleCmdNotification(event) {
+                const msg = textDecoder.decode(event.target.value);
+                if (msg === "STATUS:FULL") {
+                    this.log("⚠️ Memory Full!");
+                    alert(`${this.device.name} is Full! Download or Clear data.`);
+                } else if (msg === "STATUS:CLEARED") {
+                    this.log("✅ Device Storage Cleared.");
+                }
+            }
+
+            async startDownload() {
+                if (this.isDownloading) return;
+                this.isDownloading = true;
+                this.fileBuffer = new Uint8Array(0);
+                this.parsedData = [];
+                this.packetsReceived = 0;
+                
+                this.ui.querySelector('.btn-download').disabled = true;
+                this.progressContainer.classList.remove('hidden');
+                this.progressBar.style.width = "0%";
+                
+                this.log("Starting Download...");
+
+                await this.fileChar.startNotifications();
+                this.dataHandlerRef = (e) => this.handleDataPacket(e);
+                this.fileChar.addEventListener('characteristicvaluechanged', this.dataHandlerRef);
+                
+                await this.sendCommand('export_ble');
+            }
+
+            async handleDataPacket(event) {
+                const value = event.target.value;
+
+                if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+                // 5s Watchdog: Patient enough for multiple devices
+                this.watchdogTimer = setTimeout(async () => {
+                    if (this.isDownloading) {
+                        this.log("⚠️ Watchdog: Sending Failsafe ACK...");
+                        try { await this.cmdChar.writeValue(ACK_MESSAGE); this.packetsReceived = 0; } catch (e) {}
+                    }
+                }, 5000);
+
+                if (value.byteLength < 20) {
+                    try {
+                        const text = textDecoder.decode(value);
+                        if (text === "END_OF_FILE") {
+                            this.finishDownload();
+                            return;
+                        }
+                    } catch (e) {}
+                }
+
+                this.packetsReceived++;
+                if (this.packetsReceived % BATCH_SIZE === 0) {
+                    await this.cmdChar.writeValue(ACK_MESSAGE);
+                    if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+                }
+
+                const newData = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+                let combined = new Uint8Array(this.fileBuffer.length + newData.length);
+                combined.set(this.fileBuffer);
+                combined.set(newData, this.fileBuffer.length);
+                this.fileBuffer = combined;
+
+                while (this.fileBuffer.length >= LOG_ENTRY_SIZE) {
+                    this.parseEntry(this.fileBuffer.slice(0, LOG_ENTRY_SIZE));
+                    this.fileBuffer = this.fileBuffer.slice(LOG_ENTRY_SIZE);
+                }
+
+                if (this.parsedData.length % 100 === 0) {
+                    this.log(`Received: ${this.parsedData.length} pts`);
+                    let p = (this.parsedData.length % 1000) / 10;
+                    this.progressBar.style.width = `${p}%`;
+                }
+            }
+
+            parseEntry(bytes) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                this.parsedData.push({
+                    timestamp: view.getUint32(0, true),
+                    ax: view.getInt16(4, true), ay: view.getInt16(6, true), az: view.getInt16(8, true),
+                    gx: view.getInt16(10, true), gy: view.getInt16(12, true), gz: view.getInt16(14, true)
+                });
+            }
+
+            async finishDownload() {
+                if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+                await this.fileChar.stopNotifications();
+                this.fileChar.removeEventListener('characteristicvaluechanged', this.dataHandlerRef);
+                
+                this.isDownloading = false;
+                this.ui.querySelector('.btn-download').disabled = false;
+                this.progressBar.style.width = "100%";
+                this.log(`Download Complete. Saving ${this.parsedData.length} points.`);
+                this.saveCSV();
+            }
+
+            saveCSV() {
+                if(this.parsedData.length === 0) return;
+                let csv = "timestamp,ax,ay,az,gx,gy,gz\n";
+                this.parsedData.forEach(d => {
+                    csv += `${d.timestamp},${d.ax},${d.ay},${d.az},${d.gx},${d.gy},${d.gz}\n`;
+                });
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${this.device.name}_${Date.now()}.csv`;
+                a.click();
+            }
+
+            onDisconnected() {
+                this.log("Disconnected.");
+                this.statusBadge.textContent = "Offline";
+                this.statusBadge.className = "px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-800";
+                this.ui.querySelector('.btn-start').disabled = true;
+                this.ui.querySelector('.btn-stop').disabled = true;
+                this.ui.querySelector('.btn-clear').disabled = true;
+                this.ui.querySelector('.btn-download').disabled = true;
+            }
+
+            disconnect() {
+                if (this.device.gatt.connected) {
+                    this.device.gatt.disconnect();
+                }
+            }
+        }
+
+        const addDeviceBtn = document.getElementById('addDeviceBtn');
+        const deviceGrid = document.getElementById('deviceGrid');
+        const deviceTemplate = document.getElementById('deviceTemplate');
+
+        addDeviceBtn.addEventListener('click', async () => {
+            try {
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [SERVICE_UUID]
+                });
+                const clone = deviceTemplate.content.cloneNode(true);
+                const card = clone.querySelector('div');
+                deviceGrid.appendChild(card);
+                const imuController = new IMUDevice(device, card);
+                await imuController.connect();
+            } catch (e) {
+                console.log("Scan cancelled", e);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Bluetooth R/W Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif'], }, }, }, }
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-900 flex items-center justify-center min-h-screen p-4">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-2xl">
+        <h1 class="text-2xl font-bold mb-6 text-center">IMU Sync + Fast Export</h1>
+        
+        <button id="scanButton" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300">
+            Scan for Bluetooth Devices
+        </button>
+
+        <div id="mainControls" class="hidden mt-6">
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <button id="cmdStart" class="bg-green-500 text-white font-bold py-2 px-4 rounded hover:bg-green-600">Start Logging</button>
+                <button id="cmdStop" class="bg-red-500 text-white font-bold py-2 px-4 rounded hover:bg-red-600">Stop Logging</button>
+            </div>
+            
+            <h2 class="text-lg font-semibold mb-2">Data Export</h2>
+            <div class="flex space-x-2 mb-4">
+                <button id="cmdExport" class="flex-1 bg-purple-500 text-white font-bold py-2 px-4 rounded hover:bg-purple-600">Download Data (BLE)</button>
+                <button id="downloadCsvButton" class="flex-1 bg-gray-600 text-white font-bold py-2 px-4 rounded hover:bg-gray-700" disabled>Save CSV</button>
+            </div>
+            
+            <div class="text-xs text-gray-500 mb-1">Transfer Log:</div>
+            <pre id="fileResults" class="text-sm text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto bg-gray-50 p-2 rounded-lg border"></pre>
+        </div>
+
+        <div class="mt-6 text-left bg-gray-50 p-4 rounded-lg">
+            <h2 class="text-lg font-semibold mb-2">System Log:</h2>
+            <pre id="results" class="text-sm text-gray-700 whitespace-pre-wrap h-32 overflow-y-auto"></pre>
+        </div>
+    </div>
+
+    <script>
+
+        const devices = []; 
+
+        class DeviceSession {
+            constructor(device, server, cmdChar, fileChar) {
+                this.device = device;
+                this.server = server;
+                this.cmdChar = cmdChar;
+                this.fileChar = fileChar;
+
+                this.fileBuffer = new Uint8Array(0);
+                this.parsedData = [];
+                this.isDownloading = false;
+                this.isAutoCycle = false;
+                this.csvBlob = null;
+
+                this._bleQueue = Promise.resolve();
+                this._ackCounter = 0;
+
+                this.handleStatusNotification = this.handleStatusNotification.bind(this);
+                this.handleDataPacket = this.handleDataPacket.bind(this);
+            }
+
+            log(msg) {
+                log(`[${this.device.name}] ${msg}`);
+            }
+
+            async syncTime() {
+                const now = new Date();
+                const midnight = new Date(now);
+                midnight.setHours(0, 0, 0, 0);
+                const msSinceMidnight = now.getTime() - midnight.getTime();
+                await this.writeCommand(`TIME:${msSinceMidnight}`);
+            }
+
+            // --- FIXED: Write Command with Error Recovery ---
+            async writeCommand(cmd) {
+                // We wrap the write in a try/catch INSIDE the chain.
+                // This ensures that if one command fails, the queue doesn't die.
+                this._bleQueue = this._bleQueue.then(async () => {
+                    try {
+                        const data = typeof cmd === 'string' ? textEncoder.encode(cmd) : cmd;
+                        await this.cmdChar.writeValue(data);
+                    } catch (error) {
+                        this.log(`Write Error: ${error.message}`);
+                        // We do NOT re-throw, so the chain continues for future commands
+                    }
+                });
+                return this._bleQueue;
+            }
+
+            async start() {
+                await this.writeCommand('start');
+                this.log('Sent: start');
+            }
+
+            async stop() {
+                await this.writeCommand('stop');
+                this.log('Sent: stop');
+            }
+
+            async export() {
+                if (this.isDownloading) return;
+
+                this.isDownloading = true;
+                this.fileBuffer = new Uint8Array(0);
+                this.parsedData = [];
+                
+                // Disable CSV button while downloading
+                downloadCsvButton.disabled = true;
+
+                this.log('Starting Download...');
+
+                try {
+                    // 1. Ensure any previous listeners are removed to prevent duplicates
+                    try { await this.fileChar.stopNotifications(); } catch(e) {}
+                    this.fileChar.removeEventListener('characteristicvaluechanged', this.handleDataPacket);
+
+                    // 2. Attach Listener BEFORE starting notifications (Best Practice)
+                    this.fileChar.addEventListener('characteristicvaluechanged', this.handleDataPacket);
+
+                    // 3. Start Notifications
+                    await this.fileChar.startNotifications();
+                    this.log('Notifications enabled. Requesting data...');
+
+                    // 4. Send trigger command
+                    await this.writeCommand('stop'); // Ensure logging is stopped
+                    await new Promise(r => setTimeout(r, 100)); // Slight delay for firmware stability
+                    await this.writeCommand('export_ble');
+
+                } catch (e) {
+                    this.log(`Setup Error: ${e.message}`);
+                    this.isDownloading = false;
+                }
+            }
+
+            async handleStatusNotification(event) {
+                const value = event.target.value;
+                if (value.byteLength > 100) return;
+
+                const msg = textDecoder.decode(value);
+                // this.log(`Status: ${msg}`); // Optional debug
+
+                if (msg === "STATUS:FULL") {
+                    this.log("⚠️ Memory Full → Auto Export");
+                    this.isAutoCycle = true;
+                    this.export();
+                }
+            }
+
+            async handleDataPacket(event) {
+                const value = event.target.value;
+
+                // 1. Check for text commands (Start/End)
+                // We only decode if length is small to save CPU on massive binary packets
+                if (value.byteLength < 20) {
+                    try {
+                        const text = textDecoder.decode(value);
+                        if (text === "END_OF_FILE") {
+                            await this.finishDownload();
+                            return;
+                        }
+                    } catch (e) { /* Not text, ignore */ }
+                }
+
+                // 2. Append Data
+                const newData = new Uint8Array(value.buffer);
+                const combined = new Uint8Array(this.fileBuffer.length + newData.length);
+                combined.set(this.fileBuffer);
+                combined.set(newData, this.fileBuffer.length);
+                this.fileBuffer = combined;
+
+                // 3. Parse Complete Entries immediately
+                while (this.fileBuffer.length >= LOG_ENTRY_SIZE) {
+                    this.parseEntry(this.fileBuffer.slice(0, LOG_ENTRY_SIZE));
+                    this.fileBuffer = this.fileBuffer.slice(LOG_ENTRY_SIZE);
+                }
+
+                // 4. Send ACK (Optimized)
+                this._ackCounter++;
+                if (this._ackCounter >= 5) {
+                    // CRITICAL FIX: Do NOT await this. 
+                    // Awaiting here blocks the event loop if BLE write is slower than read.
+                    this.writeCommand(ACK_MESSAGE); 
+                    this._ackCounter = 0;
+                }
+            }
+
+            async finishDownload() {
+                try {
+                    await this.fileChar.stopNotifications();
+                    this.fileChar.removeEventListener('characteristicvaluechanged', this.handleDataPacket);
+                } catch(e) { console.warn(e); }
+
+                this.log(`Download complete (${this.parsedData.length} entries)`);
+                logFile(`Received ${this.parsedData.length} entries.`);
+
+                this.csvBlob = this.prepareCsv();
+                downloadCsvButton.disabled = false;
+                this.isDownloading = false;
+
+                if (this.isAutoCycle) {
+                    this.log("Auto-resuming logging...");
+                    await this.start();
+                    this.isAutoCycle = false;
+                }
+            }
+
+            parseEntry(bytes) {
+                const view = new DataView(bytes.buffer);
+                this.parsedData.push({
+                    timestamp: view.getUint32(0, true),
+                    ax: view.getInt16(4, true),
+                    ay: view.getInt16(6, true),
+                    az: view.getInt16(8, true),
+                    gx: view.getInt16(10, true),
+                    gy: view.getInt16(12, true),
+                    gz: view.getInt16(14, true)
+                });
+            }
+
+            prepareCsv() {
+                if (this.parsedData.length === 0) return null;
+                // Using map + join is often faster than looping strings manually
+                const header = "timestamp,ax,ay,az,gx,gy,gz\n";
+                const rows = this.parsedData.map(d => 
+                    `${d.timestamp},${d.ax},${d.ay},${d.az},${d.gx},${d.gy},${d.gz}`
+                ).join("\n");
+                return new Blob([header + rows], { type: 'text/csv' });
+            }
+        }
+
+        // --- Configuration ---
+        const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const CMD_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const FILE_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+        const LOG_ENTRY_SIZE = 16; 
+
+        // --- UI Elements ---
+        const scanButton = document.getElementById('scanButton');
+        const mainControls = document.getElementById('mainControls');
+        const resultsArea = document.getElementById('results');
+        const fileResults = document.getElementById('fileResults');
+        
+        const cmdStart = document.getElementById('cmdStart');
+        const cmdStop = document.getElementById('cmdStop');
+        const cmdExport = document.getElementById('cmdExport');
+        const downloadCsvButton = document.getElementById('downloadCsvButton');
+
+        const textEncoder = new TextEncoder();
+        const textDecoder = new TextDecoder('utf-8');
+        const ACK_MESSAGE = textEncoder.encode('ACK');
+
+        // --- Logging Utilities ---
+        function log(msg) {
+            console.log(msg);
+            resultsArea.textContent += msg + '\n';
+            resultsArea.scrollTop = resultsArea.scrollHeight;
+        }
+        function logFile(msg) {
+            fileResults.textContent = msg + '\n' + fileResults.textContent;
+        }
+
+        // --- Bluetooth Connect ---
+        scanButton.addEventListener('click', async () => {
+            try {
+                if (devices.length >= 2) {
+                    log("Already connected to 2 devices.");
+                    return;
+                }
+
+                log('Scanning...');
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+
+                const cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+                const fileChar = await service.getCharacteristic(FILE_CHAR_UUID);
+
+                const session = new DeviceSession(device, server, cmdChar, fileChar);
+                devices.push(session);
+
+                await cmdChar.startNotifications();
+                cmdChar.addEventListener(
+                    'characteristicvaluechanged',
+                    session.handleStatusNotification
+                );
+
+                await session.syncTime();
+
+                log(`Connected to ${device.name}`);
+                mainControls.classList.remove('hidden');
+
+                if (devices.length === 2) {
+                    scanButton.textContent = "2 Devices Connected";
+                    scanButton.disabled = true;
+                }
+
+            } catch (e) {
+                log('Error: ' + e.message);
+            }
+        });
+
+        // --- Button Handlers ---
+        cmdStart.addEventListener('click', async () => {
+            for (const d of devices) await d.start();
+        });
+
+        cmdStop.addEventListener('click', async () => {
+            for (const d of devices) await d.stop();
+        });
+
+        cmdExport.addEventListener('click', async () => {
+            for (const d of devices) await d.export();
+        });
+
+        downloadCsvButton.addEventListener('click', () => {
+            devices.forEach(d => {
+                if (!d.csvBlob) return;
+                const url = URL.createObjectURL(d.csvBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${d.device.name}_${Date.now()}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+        });
+
+    </script>
+</body>
+</html>
